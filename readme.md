@@ -2,8 +2,7 @@
 
 A secure, cloud-native Retrieval-Augmented Generation (RAG) platform designed to answer complex domain queries over custom PDF documents using Qdrant Vector DB and Google Gemini Flash.
 
-🔗 **Live Application:** [https://rag-assistant.streamlit.app](https://rag-assistant.streamlit.app)
-
+🔗 **Live Application:** [https://harsinisenthilkumar-rag-assistant-app-6fkmgw.streamlit.app/](https://harsinisenthilkumar-rag-assistant-app-6fkmgw.streamlit.app/)
 ---
 
 ## 📄 Technical & Architecture Documentation

@@ -10,3 +10,4 @@ qdrant-client
 pypdf
 torch
 torchvision
+sentence-transformers

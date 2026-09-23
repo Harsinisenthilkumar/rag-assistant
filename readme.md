@@ -8,7 +8,6 @@ A secure, cloud-native Retrieval-Augmented Generation (RAG) platform designed to
 
 ## 📄 Technical & Architecture Documentation
 
-**To:** Engineering / Project Lead  
 **From:** Harsini S.  
 **Project:** Enterprise Knowledge Assistant (RAG Chatbot)  
 **Status:** Deployed & Live  

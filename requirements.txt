@@ -11,3 +11,4 @@ pypdf
 torch
 torchvision
 sentence-transformers
+gTTS

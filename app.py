@@ -1,5 +1,7 @@
 import os
 import time
+import io
+import re
 import streamlit as st
 from dotenv import load_dotenv
 from google import genai
@@ -13,6 +15,7 @@ from qdrant_client.http import models
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
+from gtts import gTTS  # ADDED: For converting text response back to speech
 
 # Load environment variables from local .env file
 load_dotenv()
@@ -27,19 +30,19 @@ st.set_page_config(
 )
 
 st.markdown("""
-    <style>
-    .main-header {
-        font-size: 2.2rem;
-        font-weight: 700;
-        color: #1E88E5;
-        margin-bottom: 0px;
-    }
-    .sub-header {
-        font-size: 1rem;
-        color: #666;
-        margin-bottom: 20px;
-    }
-    </style>
+<style>
+.main-header {
+    font-size: 2.2rem;
+    font-weight: 700;
+    color: #1E88E5;
+    margin-bottom: 0px;
+}
+.sub-header {
+    font-size: 1rem;
+    color: #666;
+    margin-bottom: 20px;
+}
+</style>
 """, unsafe_allow_html=True)
 
 st.markdown('<p class="main-header">🤖 Enterprise Knowledge Assistant</p>', unsafe_allow_html=True)
@@ -48,13 +51,10 @@ st.markdown('<p class="sub-header">Powered by RAG Architecture, Qdrant Vector DB
 # ---------------------------------------------------------
 # 2. Sidebar Configuration & API Key Management
 # ---------------------------------------------------------
-# Fetch key from environment (.env) or Streamlit Secrets (Cloud Deployment)
 google_api_key = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
 
 with st.sidebar:
     st.header("⚙️ Configuration")
-    
-    # Optional fallback UI input if environment variable is missing
     if not google_api_key:
         google_api_key = st.text_input("Enter Gemini API Key", type="password")
         if google_api_key:
@@ -63,27 +63,21 @@ with st.sidebar:
         st.success("🔒 Gemini API Key loaded securely")
 
     uploaded_file = st.file_uploader("Upload PDF Document", type=["pdf"])
-    
     st.divider()
-    
     st.header("📊 Document Insights")
     stats_placeholder = st.empty()
     stats_placeholder.info("Upload a PDF to view metadata insights.")
-    
     st.divider()
-    
-    # Chat History Controls
+
     st.header("💬 Conversation Controls")
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
     if st.session_state.messages:
-        # Clear Chat History Button
         if st.button("🗑️ Clear Chat History", use_container_width=True):
             st.session_state.messages = []
             st.rerun()
 
-        # Download Chat History Transcript
         chat_transcript = "\n\n".join([f"[{m['role'].upper()}]: {m['content']}" for m in st.session_state.messages])
         st.download_button(
             label="📥 Export Chat Transcript",
@@ -103,7 +97,10 @@ def transcribe_audio(audio_file, api_key):
     response = client.models.generate_content(
         model='gemini-2.5-flash',
         contents=[
-            "Transcribe the following user audio recording accurately into text. Return ONLY the transcribed text and nothing else.",
+            # MODIFIED: Expanded prompt to explicitly capture Tamil / Tanglish transcriptions accurately
+            "Transcribe the following user audio recording accurately. "
+            "The user may speak in English, Tamil (Tamil script), or Tanglish (Tamil language spoken using English script). "
+            "Return ONLY the exact transcribed text in the language/script spoken, with no additional conversational filler.",
             genai.types.Part.from_bytes(
                 data=audio_bytes,
                 mime_type=audio_file.type or "audio/wav"
@@ -112,6 +109,21 @@ def transcribe_audio(audio_file, api_key):
     )
     return response.text.strip()
 
+# ADDED: Helper function to convert output text to speech audio buffer
+def text_to_speech(text):
+    # Detect if text contains primary Tamil characters (Unicode range U+0B80 to U+0BFF)
+    has_tamil_script = bool(re.search(r'[\u0B80-\u0BFF]', text))
+    lang_code = "ta" if has_tamil_script else "en"
+    
+    # Clean text of markdown characters before sending to TTS
+    clean_text = re.sub(r'[*#_`~>|-]', '', text)
+    
+    tts = gTTS(text=clean_text, lang=lang_code, slow=False)
+    fp = io.BytesIO()
+    tts.write_to_fp(fp)
+    fp.seek(0)
+    return fp
+
 # ---------------------------------------------------------
 # 3. RAG Ingestion Pipeline
 # ---------------------------------------------------------
@@ -119,27 +131,21 @@ def transcribe_audio(audio_file, api_key):
 def process_and_index_pdf(file_path):
     loader = PyPDFLoader(file_path)
     docs = loader.load()
-    
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
     chunks = text_splitter.split_documents(docs)
-    
     embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-    
     client = QdrantClient(":memory:")
     collection_name = "pdf_rag_collection"
-    
     client.create_collection(
         collection_name=collection_name,
         vectors_config=models.VectorParams(size=384, distance=models.Distance.COSINE)
     )
-    
     vector_store = QdrantVectorStore(
         client=client,
         collection_name=collection_name,
         embedding=embeddings
     )
     vector_store.add_documents(chunks)
-    
     return vector_store, len(docs), len(chunks)
 
 # ---------------------------------------------------------
@@ -149,10 +155,8 @@ if uploaded_file and google_api_key:
     temp_pdf_path = f"temp_{uploaded_file.name}"
     with open(temp_pdf_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
-    
     with st.spinner("Indexing PDF chunks into Qdrant Vector DB..."):
         vector_store, total_pages, total_chunks = process_and_index_pdf(temp_pdf_path)
-    
     with stats_placeholder.container():
         col1, col2 = st.columns(2)
         col1.metric("Total Pages", total_pages)
@@ -160,28 +164,31 @@ if uploaded_file and google_api_key:
         st.caption("✅ Vector Index Status: Active in Memory")
 
     llm = ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash", 
-        temperature=0, 
+        model="gemini-2.5-flash",
+        temperature=0.2, # MODIFIED: Slightly adjusted temperature for natural phrasing
         google_api_key=google_api_key
     )
-    
     retriever = vector_store.as_retriever(search_kwargs={"k": 5})
 
+    # MODIFIED: Prompt instructions to strictly adapt language to Tanglish / Tamil / English
     prompt = ChatPromptTemplate.from_template("""
-    You are an expert enterprise business assistant. Provide a detailed, comprehensive, and well-structured answer to the user's question based strictly on the context provided below.
+You are an expert enterprise business assistant. Provide a clear, comprehensive, and accurate answer based strictly on the context provided below.
 
-    Guidelines:
-    - Explain the answer clearly using bullet points or structured paragraphs.
-    - Be thorough and detailed. Do not provide vague responses unless specifically asked.
-    - If context does not contain the answer, state "I couldn't find this information in the document."
+CRITICAL LANGUAGE GUIDELINES:
+- Detect the input question language automatically (English, Tamil, or Tanglish).
+- Match your response EXACTLY to the question's language and script:
+  1. If the question is in Tanglish (Tamil spoken in English/Roman script), answer entirely in natural Tanglish.
+  2. If the question is in Tamil script, answer entirely in formal/clear Tamil script.
+  3. If the question is in English, answer in English.
+- Use clear bullet points or bulleted lists where appropriate.
+- If the answer is not present in the context, state that clearly in the detected input language (e.g., in Tanglish: "Intha document-la intha information illa.")
 
-    Context:
-    {context}
+Context:
+{context}
 
-    Question:
-    {question}
-    """)
-    
+Question:
+{question}
+""")
     rag_chain = (
         {"context": retriever | format_docs, "question": RunnablePassthrough()}
         | prompt
@@ -207,21 +214,23 @@ if uploaded_file and google_api_key:
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
+            # ADDED: Render saved audio player if historical message came from voice
+            if "audio_bytes" in message and message["audio_bytes"]:
+                st.audio(message["audio_bytes"], format="audio/mp3")
 
-    # CHAT INPUT BAR WITH INTEGRATED MICROPHONE (RECORD BUTTON NEAR SEND)
+    # CHAT INPUT BAR WITH INTEGRATED MICROPHONE
     chat_response = st.chat_input("Ask a question or tap mic to speak...", accept_audio=True)
-    
     user_query = None
+    is_voice_input = False # ADDED: Flag to check if voice audio response is required
 
     # Parse user input (Text or Mic Recording)
     if chat_response:
-        # Scenario A: User typed plain text
         if isinstance(chat_response, str):
             user_query = chat_response
-        # Scenario B: Dict return object from chat_input with audio
         elif hasattr(chat_response, "audio") and chat_response.audio:
             with st.spinner("Transcribing recorded voice via Gemini..."):
                 user_query = transcribe_audio(chat_response.audio, google_api_key)
+                is_voice_input = True # Trigger audio answer generation
         elif hasattr(chat_response, "text") and chat_response.text:
             user_query = chat_response.text
 
@@ -231,32 +240,40 @@ if uploaded_file and google_api_key:
 
     # PROCESS NEW USER MESSAGE
     if user_query:
-        # Append and display user message in chat
         st.session_state.messages.append({"role": "user", "content": user_query})
         with st.chat_message("user"):
             st.markdown(user_query)
 
-        # Generate and display assistant message in chat
         with st.chat_message("assistant"):
             with st.spinner("Searching Qdrant DB & generating response..."):
                 start_time = time.time()
-                
                 answer = rag_chain.invoke(user_query)
                 retrieved_docs = retriever.invoke(user_query)
-                
                 elapsed_time = round(time.time() - start_time, 2)
                 
                 st.markdown(answer)
                 st.caption(f"⚡ Response generated in **{elapsed_time}s** using Qdrant Vector DB & Gemini Flash")
-                
+
+                # ADDED: Voice Generation Block (Runs if input was via microphone)
+                audio_bytes = None
+                if is_voice_input:
+                    with st.spinner("Generating speech output..."):
+                        audio_fp = text_to_speech(answer)
+                        audio_bytes = audio_fp.getvalue()
+                        st.audio(audio_bytes, format="audio/mp3", autoplay=True)
+
                 with st.expander("🔍 View Retrieved Chunks from Qdrant Vector DB"):
                     for i, doc in enumerate(retrieved_docs):
                         st.markdown(f"**Chunk {i+1} (Page {doc.metadata.get('page', 0) + 1}):**")
                         st.caption(doc.page_content)
                         st.divider()
-                        
-        # Save assistant response to session history
-        st.session_state.messages.append({"role": "assistant", "content": answer})
+
+        # Save assistant response & optional audio buffer to session history
+        st.session_state.messages.append({
+            "role": "assistant", 
+            "content": answer,
+            "audio_bytes": audio_bytes
+        })
 
 elif not uploaded_file:
     st.info("👈 Please upload a PDF document in the sidebar to initialize the knowledge assistant.")
